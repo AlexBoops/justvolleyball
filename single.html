@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
+  <title>Google Docs</title>
+  <link rel="icon" href="https://ssl.gstatic.com/docs/documents/images/kix-favicon7.ico">
+  <link href="https://fonts.googleapis.com/css2?family=Audiowide&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    html, body, #canvas {
+      width: 100%;
+      height: 100%;
+      border: 0;
+      overflow: hidden;
+      background-color: #000;
+      color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      touch-action: none;
+      user-select: none;
+    }
+
+    #canvas {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      display: block;
+      outline: none;
+    }
+
+    #hud-bar {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      gap: 8px;
+      z-index: 999999;
+      opacity: 0.45;
+      transition: opacity 0.2s ease;
+    }
+
+    #hud-bar:hover {
+      opacity: 1;
+    }
+
+    .hud-btn {
+      background-color: #111;
+      color: #fff;
+      border: 2px solid #ffd63d;
+      font-size: 11px;
+      font-family: 'Audiowide', sans-serif;
+      padding: 6px 12px;
+      cursor: pointer;
+      border-radius: 6px;
+      letter-spacing: 0.8px;
+      box-shadow: 0 0 8px rgba(255, 214, 61, 0.4);
+      transition: all 0.2s ease;
+    }
+
+    .hud-btn:hover {
+      background: #ffd63d;
+      color: #000;
+      box-shadow: 0 0 14px #ffd63d;
+    }
+
+    #status {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.94);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 20;
+      padding: 20px;
+      text-align: center;
+      transition: opacity 0.3s ease;
+    }
+
+    #loader-title {
+      font-family: 'Audiowide', sans-serif;
+      font-size: 30px;
+      letter-spacing: 2px;
+      color: #ffd63d;
+      text-shadow: 0 0 12px rgba(255, 214, 61, 0.45);
+      margin-bottom: 6px;
+    }
+
+    #loader-sub {
+      font-size: 13px;
+      color: #9ca3af;
+      margin-bottom: 22px;
+    }
+
+    #progress-track {
+      width: min(440px, 84vw);
+      height: 14px;
+      background: #1a1a1a;
+      border: 2px solid #ffd63d;
+      border-radius: 999px;
+      overflow: hidden;
+      box-shadow: 0 0 12px rgba(255, 214, 61, 0.25);
+    }
+
+    #progress-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #ff9900, #ffd63d);
+      transition: width 0.12s ease-out;
+    }
+
+    #loader-status {
+      margin-top: 10px;
+      font-size: 12px;
+      font-family: monospace;
+      color: #d1d5db;
+    }
+
+    #status-notice {
+      display: none;
+      margin-top: 14px;
+      max-width: min(520px, 88vw);
+      background-color: #5b3943;
+      border-radius: 0.5rem;
+      border: 1px solid #9b3943;
+      color: #e0e0e0;
+      line-height: 1.4;
+      padding: 1rem;
+      text-align: center;
+      font-size: 13px;
+    }
+  </style>
+</head>
+<body>
+  <div id="hud-bar">
+    <button class="hud-btn" id="btn-ab" onclick="openCloaked()">about:blank</button>
+    <button class="hud-btn" id="btn-fs" onclick="toggleFullscreen()">Fullscreen</button>
+  </div>
+
+  <canvas id="canvas" tabindex="-1">Your browser does not support the canvas tag.</canvas>
+
+  <div id="status">
+    <div id="loader-title">JUST VOLLEYBALL</div>
+    <div id="loader-sub">Godot WebGL Port</div>
+    <div id="progress-track">
+      <div id="progress-fill"></div>
+    </div>
+    <div id="loader-status">Initializing...</div>
+    <div id="status-notice"></div>
+  </div>
+
+  <script>
+    (function () {
+      "use strict";
+
+      const CDN_ROOT = "https://cdn.jsdelivr.net/gh/AlexBoops/justvolleyball@main";
+      const PCK_PARTS = 6;  // index.pck.part0 .. index.pck.part5
+      const WASM_PARTS = 2; // index.wasm.part0 .. index.wasm.part1
+      const PCK_SIZE = 110857964;
+      const WASM_SIZE = 39514754;
+
+      const progressFill = document.getElementById("progress-fill");
+      const statusText = document.getElementById("loader-status");
+      const statusOverlay = document.getElementById("status");
+      const statusNotice = document.getElementById("status-notice");
+
+      // 1. Web Audio Auto-Unlock
+      const audioCtxs = [];
+      const OrigAudioContext = window.AudioContext || window.webkitAudioContext;
+      if (OrigAudioContext) {
+        const PatchedAudioContext = function (opts) {
+          const ctx = new OrigAudioContext(opts);
+          audioCtxs.push(ctx);
+          return ctx;
+        };
+        PatchedAudioContext.prototype = OrigAudioContext.prototype;
+        window.AudioContext = PatchedAudioContext;
+        if (window.webkitAudioContext) window.webkitAudioContext = PatchedAudioContext;
+
+        const resumeAll = () => {
+          audioCtxs.forEach((c) => {
+            if (c && c.state === "suspended") c.resume().catch(() => {});
+          });
+        };
+        window.addEventListener("pointerdown", resumeAll, { passive: true });
+        window.addEventListener("keydown", resumeAll, { passive: true });
+      }
+
+      // 2. Pointer Lock Error Guard
+      const origLock = Element.prototype.requestPointerLock || function () {};
+      Element.prototype.requestPointerLock = function () {
+        try {
+          const res = origLock.apply(this, arguments);
+          if (res && typeof res.catch === "function") res.catch(() => {});
+          return res;
+        } catch (e) {}
+      };
+
+      // 3. Same-Origin Blob Shim for Godot AudioWorklet & Workers
+      const nativeFetch = window.fetch.bind(window);
+      const workletBlobCache = new Map();
+
+      async function getSameOriginScriptBlobUrl(relUrl) {
+        const clean = relUrl.replace(/^\.?\//, "");
+        if (workletBlobCache.has(clean)) return workletBlobCache.get(clean);
+        const res = await nativeFetch(`${CDN_ROOT}/${clean}`);
+        if (!res.ok) throw new Error(`Failed to load ${clean} (${res.status})`);
+        const code = await res.text();
+        const blobUrl = URL.createObjectURL(new Blob([code], { type: "application/javascript" }));
+        workletBlobCache.set(clean, blobUrl);
+        return blobUrl;
+      }
+
+      if (window.AudioWorklet && AudioWorklet.prototype.addModule) {
+        const origAddModule = AudioWorklet.prototype.addModule;
+        AudioWorklet.prototype.addModule = async function (moduleURL, options) {
+          if (typeof moduleURL === "string" && !/^(https?:|blob:|data:)/i.test(moduleURL)) {
+            const blobUrl = await getSameOriginScriptBlobUrl(moduleURL);
+            return origAddModule.call(this, blobUrl, options);
+          }
+          return origAddModule.call(this, moduleURL, options);
+        };
+      }
+
+      // 4. Parallel Chunk Reassembly + fetch() Shim
+      let reassembledPckBuffer = null;
+      let reassembledWasmBuffer = null;
+
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : (input && input.url) || String(input);
+
+        if (reassembledPckBuffer && /(?:^|\/)index\.pck(?:$|\?)/.test(url)) {
+          return Promise.resolve(
+            new Response(reassembledPckBuffer, {
+              status: 200,
+              statusText: "OK",
+              headers: {
+                "Content-Type": "application/octet-stream",
+                "Content-Length": String(PCK_SIZE)
+              }
+            })
+          );
+        }
+
+        if (reassembledWasmBuffer && /(?:^|\/)index\.wasm(?:$|\?)/.test(url)) {
+          return Promise.resolve(
+            new Response(reassembledWasmBuffer, {
+              status: 200,
+              statusText: "OK",
+              headers: {
+                "Content-Type": "application/wasm",
+                "Content-Length": String(WASM_SIZE)
+              }
+            })
+          );
+        }
+
+        if (typeof input === "string" && !/^(https?:|blob:|data:)/i.test(input)) {
+          const clean = input.replace(/^\.?\//, "");
+          input = `${CDN_ROOT}/${clean}`;
+        }
+
+        return nativeFetch(input, init);
+      };
+
+      function showNotice(err) {
+        console.error(err);
+        const msg = err instanceof Error ? err.message : String(err);
+        statusNotice.textContent = msg;
+        statusNotice.style.display = "block";
+      }
+
+      async function downloadAndStitchChunks() {
+        const totalChunks = PCK_PARTS + WASM_PARTS;
+        let completed = 0;
+
+        const fetchPart = (filename) =>
+          nativeFetch(`${CDN_ROOT}/${filename}`).then(async (res) => {
+            if (!res.ok) throw new Error(`Failed to fetch ${filename} (HTTP ${res.status})`);
+            const buf = await res.arrayBuffer();
+            completed++;
+            const pct = Math.round((completed / totalChunks) * 75);
+            progressFill.style.width = `${pct}%`;
+            statusText.textContent = `Downloading game data (${completed}/${totalChunks})...`;
+            return new Uint8Array(buf);
+          });
+
+        const pckTasks = Array.from({ length: PCK_PARTS }, (_, i) => fetchPart(`index.pck.part${i}`));
+        const wasmTasks = Array.from({ length: WASM_PARTS }, (_, i) => fetchPart(`index.wasm.part${i}`));
+
+        const [pckParts, wasmParts] = await Promise.all([
+          Promise.all(pckTasks),
+          Promise.all(wasmTasks)
+        ]);
+
+        const concat = (parts) => {
+          const total = parts.reduce((sum, p) => sum + p.byteLength, 0);
+          const merged = new Uint8Array(total);
+          let offset = 0;
+          for (const p of parts) {
+            merged.set(p, offset);
+            offset += p.byteLength;
+          }
+          return merged.buffer;
+        };
+
+        reassembledPckBuffer = concat(pckParts);
+        reassembledWasmBuffer = concat(wasmParts);
+      }
+
+      // 5. HUD Controls
+      window.openCloaked = function () {
+        const btn = document.getElementById("btn-ab");
+        const win = window.open("about:blank", "_blank");
+        if (!win || win.closed) {
+          btn.textContent = "Allow Popups!";
+          setTimeout(() => { btn.textContent = "about:blank"; }, 3000);
+          return;
+        }
+        const clone = document.documentElement.cloneNode(true);
+        const ab = clone.querySelector("#btn-ab");
+        if (ab) ab.remove();
+        win.document.open();
+        win.document.write("<!DOCTYPE html>\n" + clone.outerHTML);
+        win.document.close();
+      };
+
+      window.toggleFullscreen = function () {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen().catch(() => {});
+        } else {
+          document.exitFullscreen().catch(() => {});
+        }
+      };
+
+      // 6. Boot Godot Engine
+      (async function boot() {
+        try {
+          statusText.textContent = `Downloading game data (0/${PCK_PARTS + WASM_PARTS})...`;
+          await downloadAndStitchChunks();
+
+          statusText.textContent = "Loading Godot runtime...";
+          progressFill.style.width = "80%";
+
+          const runtimeScript = document.createElement("script");
+          runtimeScript.src = `${CDN_ROOT}/index.js`;
+          runtimeScript.onload = () => {
+            const GODOT_CONFIG = {
+              args: [],
+              canvasResizePolicy: 2,
+              emscriptenPoolSize: 8,
+              ensureCrossOriginIsolationHeaders: false,
+              executable: "index",
+              experimentalVK: false,
+              fileSizes: {
+                "index.pck": PCK_SIZE,
+                "index.wasm": WASM_SIZE
+              },
+              focusCanvas: true,
+              gdextensionLibs: [],
+              godotPoolSize: 4
+            };
+
+            const engine = new Engine(GODOT_CONFIG);
+            engine.startGame({
+              onProgress: function (current, total) {
+                if (current > 0 && total > 0) {
+                  const pct = Math.round(80 + (current / total) * 20);
+                  progressFill.style.width = `${pct}%`;
+                  statusText.textContent = `Starting WebGL engine (${pct}%)...`;
+                }
+              }
+            }).then(() => {
+              reassembledPckBuffer = null;
+              reassembledWasmBuffer = null;
+              statusOverlay.style.opacity = "0";
+              setTimeout(() => statusOverlay.remove(), 300);
+              document.getElementById("canvas").focus();
+            }, showNotice);
+          };
+          runtimeScript.onerror = () => showNotice("Failed to load index.js from jsDelivr.");
+          document.body.appendChild(runtimeScript);
+        } catch (err) {
+          showNotice(err);
+        }
+      })();
+    })();
+  </script>
+</body>
+</html>
